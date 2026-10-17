@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DSP Playground</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap">
+<style>
+:root{--bg:#e8edf2;--surface:#f6f8fa;--ink:#13203a;--muted:#6b7a90;--line:#cbd5e0;--accent:#2f5bea;--hot:#e8871e;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0e1621;--surface:#152131;--ink:#e6edf6;--muted:#8394ab;--line:#26364b;--accent:#6f93ff;--hot:#f2a24a}}
+:root[data-theme="dark"]{--bg:#0e1621;--surface:#152131;--ink:#e6edf6;--muted:#8394ab;--line:#26364b;--accent:#6f93ff;--hot:#f2a24a}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Bricolage Grotesque",system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.45}
+.wrap{max-width:980px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:clamp(28px,7vw,44px);font-weight:800;letter-spacing:-.02em;margin:8px 0 4px}
+.sub{color:var(--muted);margin:0 0 18px;max-width:46ch}
+.stage{background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+canvas{display:block;width:100%}
+#wave{height:80px;cursor:pointer;border-bottom:1px solid var(--line)}
+#spec{height:190px}
+.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:14px 0 6px}
+button,.btn{font:inherit;font-weight:600;font-size:15px;padding:10px 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;min-height:44px;display:inline-flex;align-items:center}
+button.main{background:var(--accent);border-color:var(--accent);color:#fff;min-width:96px;justify-content:center}
+button:focus-visible,.btn:focus-within,input:focus-visible{outline:3px solid var(--hot);outline-offset:2px}
+.chk{display:inline-flex;gap:6px;align-items:center;color:var(--muted)}
+#time{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--muted)}
+#name{color:var(--muted);font-size:14px;margin:0 0 6px;min-height:20px}
+#fx{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:4px 32px;margin-top:10px}
+section{border-top:2px solid var(--ink);padding:10px 0 14px}
+h2{font-size:18px;margin:0 0 8px;font-weight:600}
+.row{display:grid;grid-template-columns:1fr auto;gap:0 10px;margin:8px 0}
+.row span:last-child{color:var(--muted);font-variant-numeric:tabular-nums}
+.row input{grid-column:1/3;width:100%;accent-color:var(--accent);height:28px;margin:2px 0 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>DSP Playground</h1>
+<p class="sub">Pilih file audio, atur efeknya, dan dengar hasilnya langsung. Semua diproses di browser Anda.</p>
+<div class="stage"><canvas id="wave"></canvas><canvas id="spec"></canvas></div>
+<div class="bar">
+<label class="btn">Pilih file audio<input id="file" type="file" accept="audio/*" hidden></label>
+<button id="demo">Nada contoh</button>
+<button id="play" class="main">Play</button>
+<label class="chk"><input id="loop" type="checkbox" checked> Ulangi</label>
+<span id="time">0:00 / 0:00</span>
+</div>
+<p id="name">Belum ada audio. Pilih file atau coba nada contoh.</p>
+<div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap"><button id="dl" class="main">Download hasil</button><button id="reset">Reset efek</button></div>
+<p id="msg" style="color:var(--muted);font-size:14px;margin:6px 0 0;text-align:right;min-height:20px"></p>
+<main id="fx"></main>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+const groups=[
+["Kecepatan",[
+["speed","Kecepatan putar",.25,2,.01,1,v=>v.toFixed(2)+"x"]]],
+["Volume & filter",[
+["gain","Volume",0,2,.01,1,v=>Math.round(v*100)+"%"],
+["hp","High-pass",20,2000,1,20,v=>v+" Hz"],
+["lp","Low-pass",500,20000,10,20000,v=>v+" Hz"]]],
+["Equalizer",[
+["bass","Bass",-15,15,.5,0,v=>v+" dB"],
+["mid","Mid",-15,15,.5,0,v=>v+" dB"],
+["treble","Treble",-15,15,.5,0,v=>v+" dB"]]],
+["Distorsi",[["drive","Drive",0,100,1,0,v=>v+"%"]]],
+["Delay",[
+["dtime","Waktu",.05,1,.01,.3,v=>Math.round(v*1000)+" ms"],
+["dfb","Feedback",0,.9,.01,.35,v=>Math.round(v*100)+"%"],
+["dmix","Mix",0,1,.01,0,v=>Math.round(v*100)+"%"]]],
+["Reverb",[
+["rsize","Ukuran",.3,4,.1,1.5,v=>v+" s"],
+["rmix","Mix",0,1,.01,0,v=>Math.round(v*100)+"%"]]]
+];
+const P={},D={},labels={};
+const fx=$("#fx");
+groups.forEach(([title,items])=>{
+  const s=document.createElement("section");
+  s.innerHTML="<h2>"+title+"</h2>";
+  items.forEach(([id,label,min,max,step,val,fmt])=>{
+    P[id]=val;D[id]=val;
+    const r=document.createElement("div");r.className="row";
+    r.innerHTML='<span>'+label+'</span><span id="v-'+id+'">'+fmt(val)+'</span><input type="range" id="s-'+id+'" min="'+min+'" max="'+max+'" step="'+step+'" value="'+val+'" aria-label="'+label+'">';
+    const inp=r.querySelector("input");
+    labels[id]=fmt;
+    inp.addEventListener("input",()=>{P[id]=+inp.value;$("#v-"+id).textContent=fmt(P[id]);apply(id)});
+    s.appendChild(r);
+  });
+  fx.appendChild(s);
+});
+$("#reset").onclick=()=>{for(const id in D){P[id]=D[id];$("#s-"+id).value=D[id];$("#v-"+id).textContent=labels[id](D[id])}apply()};
+
+let ctx,N={},buf,src,offset=0,startedAt=0,playing=false,peaks=[],curRate=1,base="audio";
+const bq=(t,f=1000,g=0)=>{const n=ctx.createBiquadFilter();n.type=t;n.frequency.value=f;n.gain.value=g;n.Q.value=.7;return n};
+function ir(sec){const r=ctx.sampleRate,l=Math.floor(r*sec),b=ctx.createBuffer(2,l,r);
+  for(let c=0;c<2;c++){const d=b.getChannelData(c);for(let i=0;i<l;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/l,3)}return b}
+function curve(k){const n=1024,c=new Float32Array(n);
+  for(let i=0;i<n;i++){const x=i*2/(n-1)-1;c[i]=k?(1+k)*x/(1+k*Math.abs(x)):x}return c}
+function initAudio(){
+  if(ctx)return;
+  ctx=new(window.AudioContext||window.webkitAudioContext)();
+  N.pre=ctx.createGain();
+  N.hp=bq("highpass");N.lp=bq("lowpass");
+  N.bass=bq("lowshelf",200);N.mid=bq("peaking",1000);N.treble=bq("highshelf",4000);
+  N.shaper=ctx.createWaveShaper();N.shaper.oversample="2x";
+  N.bus=ctx.createGain();
+  N.delay=ctx.createDelay(1.5);N.fb=ctx.createGain();N.dwet=ctx.createGain();
+  N.conv=ctx.createConvolver();N.rwet=ctx.createGain();
+  N.master=ctx.createGain();
+  N.an=ctx.createAnalyser();N.an.fftSize=2048;N.an.smoothingTimeConstant=.8;
+  N.pre.connect(N.hp);N.hp.connect(N.bass);N.bass.connect(N.mid);N.mid.connect(N.treble);
+  N.treble.connect(N.lp);N.lp.connect(N.shaper);N.shaper.connect(N.bus);
+  N.bus.connect(N.master);
+  N.bus.connect(N.delay);N.delay.connect(N.fb);N.fb.connect(N.delay);N.delay.connect(N.dwet);N.dwet.connect(N.master);
+  N.bus.connect(N.conv);N.conv.connect(N.rwet);N.rwet.connect(N.master);
+  N.master.connect(N.an);N.an.connect(ctx.destination);
+  N.conv.buffer=ir(P.rsize);
+  apply();
+}
+function apply(id){
+  if(id==="speed"||!id){
+    if(ctx&&playing){offset=pos();startedAt=ctx.currentTime}
+    curRate=P.speed;
+    if(src)src.playbackRate.value=P.speed;
+  }
+  if(!ctx)return;
+  const t=ctx.currentTime;
+  N.pre.gain.setTargetAtTime(P.gain,t,.01);
+  N.hp.frequency.setTargetAtTime(P.hp,t,.01);
+  N.lp.frequency.setTargetAtTime(P.lp,t,.01);
+  N.bass.gain.setTargetAtTime(P.bass,t,.01);
+  N.mid.gain.setTargetAtTime(P.mid,t,.01);
+  N.treble.gain.setTargetAtTime(P.treble,t,.01);
+  N.delay.delayTime.setTargetAtTime(P.dtime,t,.02);
+  N.fb.gain.setTargetAtTime(P.dfb,t,.01);
+  N.dwet.gain.setTargetAtTime(P.dmix,t,.01);
+  N.rwet.gain.setTargetAtTime(P.rmix,t,.01);
+  if(!id||id==="drive")N.shaper.curve=curve(P.drive*.8);
+  if(id==="rsize")N.conv.buffer=ir(P.rsize);
+}
+function setBuffer(b,name){
+  stop(true);buf=b;offset=0;base=name.replace(/\.[^.]+$/,"").replace(/[^\w\- ]+/g,"_")||"audio";
+  $("#name").textContent=name+" · "+b.duration.toFixed(1)+" detik";
+  calcPeaks();
+}
+function calcPeaks(){
+  if(!buf)return;
+  const w=$("#wave").clientWidth,step=Math.max(1,Math.floor(buf.length/w)),d=buf.getChannelData(0);peaks=[];
+  for(let x=0;x<w;x++){let m=0;for(let i=x*step;i<(x+1)*step&&i<d.length;i+=8)m=Math.max(m,Math.abs(d[i]));peaks.push(m)}
+}
+$("#file").addEventListener("change",async e=>{
+  const f=e.target.files[0];if(!f)return;
+  initAudio();
+  try{setBuffer(await ctx.decodeAudioData(await f.arrayBuffer()),f.name)}
+  catch(err){$("#name").textContent="File ini tidak bisa dibaca. Coba format WAV, MP3, atau M4A."}
+});
+$("#demo").onclick=()=>{
+  initAudio();
+  const r=ctx.sampleRate,b=ctx.createBuffer(1,r*4,r),d=b.getChannelData(0),fr=[110,164.8,220,261.6];
+  for(let i=0;i<d.length;i++){
+    const t=i/r,env=Math.exp(-(t%1)*3);let s=0;
+    fr.forEach(f=>s+=(2*((f*t)%1)-1)*.12);
+    const tk=(t%.5);if(tk<.04)s+=(Math.random()*2-1)*.3*(1-tk/.04);
+    d[i]=s*(.4+.6*env);
+  }
+  setBuffer(b,"Nada contoh");
+};
+function play(){
+  if(!buf)return;
+  initAudio();ctx.resume();
+  src=ctx.createBufferSource();src.buffer=buf;src.loop=$("#loop").checked;
+  src.connect(N.pre);
+  src.onended=()=>{if(src===s0){playing=false;if(!src.loop)offset=0;ui()}};
+  const s0=src;
+  src.playbackRate.value=P.speed;curRate=P.speed;
+  src.start(0,offset);startedAt=ctx.currentTime;playing=true;ui();
+}
+function pos(){return buf&&ctx?(playing?(offset+(ctx.currentTime-startedAt)*curRate)%buf.duration:offset):0}
+function stop(reset){
+  if(src){const s=src;src=null;s.onended=null;try{s.stop()}catch(e){}}
+  if(playing)offset=pos();
+  playing=false;if(reset)offset=0;ui();
+}
+function ui(){$("#play").textContent=playing?"Pause":"Play"}
+$("#play").onclick=()=>playing?stop():play();
+$("#loop").onchange=()=>{if(src)src.loop=$("#loop").checked};
+$("#wave").addEventListener("click",e=>{
+  if(!buf)return;
+  const r=e.currentTarget.getBoundingClientRect();
+  const was=playing;if(was)stop();
+  offset=(e.clientX-r.left)/r.width*buf.duration;
+  if(was)play();
+});
+async function renderOffline(){
+  const sr=buf.sampleRate,tail=(P.dmix>0?3:0)+(P.rmix>0?P.rsize:0)+.1;
+  const o=new OfflineAudioContext(2,Math.ceil((buf.duration/P.speed+tail)*sr),sr);
+  const b=(t,f,g)=>{const n=o.createBiquadFilter();n.type=t;n.frequency.value=f;n.gain.value=g;n.Q.value=.7;return n};
+  const s=o.createBufferSource();s.buffer=buf;s.playbackRate.value=P.speed;
+  const pre=o.createGain();pre.gain.value=P.gain;
+  const hp=b("highpass",P.hp,0),bs=b("lowshelf",200,P.bass),md=b("peaking",1000,P.mid),tr=b("highshelf",4000,P.treble),lp=b("lowpass",P.lp,0);
+  const sh=o.createWaveShaper();sh.oversample="2x";sh.curve=curve(P.drive*.8);
+  const bus=o.createGain(),dl=o.createDelay(1.5),fb=o.createGain(),dw=o.createGain(),cn=o.createConvolver(),rw=o.createGain();
+  dl.delayTime.value=P.dtime;fb.gain.value=P.dfb;dw.gain.value=P.dmix;rw.gain.value=P.rmix;cn.buffer=ir(P.rsize);
+  s.connect(pre);pre.connect(hp);hp.connect(bs);bs.connect(md);md.connect(tr);tr.connect(lp);lp.connect(sh);sh.connect(bus);
+  bus.connect(o.destination);
+  bus.connect(dl);dl.connect(fb);fb.connect(dl);dl.connect(dw);dw.connect(o.destination);
+  bus.connect(cn);cn.connect(rw);rw.connect(o.destination);
+  s.start();
+  return o.startRendering();
+}
+function wavBytes(ab){
+  const ch=ab.numberOfChannels,n=ab.length,sr=ab.sampleRate,v=new DataView(new ArrayBuffer(44+n*ch*2));
+  const w=(p,t)=>{for(let i=0;i<t.length;i++)v.setUint8(p+i,t.charCodeAt(i))};
+  w(0,"RIFF");v.setUint32(4,36+n*ch*2,true);w(8,"WAVEfmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,ch,true);
+  v.setUint32(24,sr,true);v.setUint32(28,sr*ch*2,true);v.setUint16(32,ch*2,true);v.setUint16(34,16,true);w(36,"data");v.setUint32(40,n*ch*2,true);
+  const d=[];for(let c=0;c<ch;c++)d.push(ab.getChannelData(c));
+  let p=44;for(let i=0;i<n;i++)for(let c=0;c<ch;c++){const x=Math.max(-1,Math.min(1,d[c][i]));v.setInt16(p,x<0?x*32768:x*32767,true);p+=2}
+  return new Uint8Array(v.buffer);
+}
+function crc32(u){
+  let t=crc32.t;
+  if(!t){t=crc32.t=[];for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c>>>0}}
+  let r=-1;for(let i=0;i<u.length;i++)r=t[(r^u[i])&255]^(r>>>8);return(r^-1)>>>0;
+}
+function zip(name,data){
+  const nb=new TextEncoder().encode(name),crc=crc32(data),sz=data.length,L=nb.length;
+  const lh=new DataView(new ArrayBuffer(30));lh.setUint32(0,0x04034b50,true);lh.setUint16(4,20,true);lh.setUint32(14,crc,true);lh.setUint32(18,sz,true);lh.setUint32(22,sz,true);lh.setUint16(26,L,true);
+  const ch=new DataView(new ArrayBuffer(46));ch.setUint32(0,0x02014b50,true);ch.setUint16(4,20,true);ch.setUint16(6,20,true);ch.setUint32(16,crc,true);ch.setUint32(20,sz,true);ch.setUint32(24,sz,true);ch.setUint16(28,L,true);
+  const e=new DataView(new ArrayBuffer(22));e.setUint32(0,0x06054b50,true);e.setUint16(8,1,true);e.setUint16(10,1,true);e.setUint32(12,46+L,true);e.setUint32(16,30+L+sz,true);
+  return new Blob([lh,nb,data,ch,nb,e]);
+}
+const msg=t=>$("#msg").textContent=t;
+if(window.claude)claude.use("downloads").then(d=>{if(d)$("#dl").hidden=false}).catch(()=>{});
+$("#dl").onclick=async()=>{
+  if(!buf)return msg("Pilih audio dulu, lalu atur efeknya.");
+  const dls=window.claude?await claude.use("downloads").catch(()=>null):null;
+  msg("Memproses audio...");
+  try{
+    const wav=wavBytes(await renderOffline());
+    if(dls){
+      await dls.save({filename:base+"-dsp.zip",data:zip(base+"-dsp.wav",wav)});
+      msg("Tersimpan. Ekstrak ZIP-nya untuk mendapat file WAV.");
+    }else{
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(new Blob([wav],{type:"audio/wav"}));
+      a.download=base+"-dsp.wav";
+      document.body.appendChild(a);a.click();a.remove();
+      msg("File WAV sudah diunduh.");
+    }
+  }catch(e){msg(e&&e.code==="declined"?"Download dibatalkan.":"Gagal membuat file. Coba lagi.")}
+};
+const fmtT=s=>Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0");
+const cv=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function fit(c){const k=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
+  if(c.width!==Math.round(w*k)){c.width=Math.round(w*k);c.height=Math.round(h*k)}
+  const g=c.getContext("2d");g.setTransform(k,0,0,k,0,0);return[g,w,h]}
+function draw(){
+  let[g,w,h]=fit($("#wave"));
+  g.clearRect(0,0,w,h);
+  if(peaks.length!==Math.floor(w)&&buf)calcPeaks();
+  const prog=buf?pos()/buf.duration:0;
+  peaks.forEach((p,x)=>{g.fillStyle=x/w<prog?cv("--accent"):cv("--muted");
+    const bh=Math.max(1,p*(h-12));g.fillRect(x,(h-bh)/2,1,bh)});
+  g.fillStyle=cv("--ink");g.fillRect(prog*w,0,2,h);
+  $("#time").textContent=fmtT(pos())+" / "+fmtT(buf?buf.duration:0);
+
+  [g,w,h]=fit($("#spec"));
+  g.clearRect(0,0,w,h);
+  g.fillStyle=cv("--muted");g.font="12px system-ui,sans-serif";
+  [100,1000,10000].forEach(f=>{const x=Math.log(f/20)/Math.log(1000)*w;
+    g.fillRect(x,0,1,h);g.fillText(f>=1000?f/1000+" kHz":f+" Hz",x+4,h-6)});
+  if(ctx){
+    const d=new Uint8Array(N.an.frequencyBinCount),nyq=ctx.sampleRate/2;
+    N.an.getByteFrequencyData(d);
+    g.beginPath();g.moveTo(0,h);
+    for(let x=0;x<=w;x+=2){
+      const f=20*Math.pow(1000,x/w),i=Math.min(d.length-1,Math.round(f/nyq*d.length));
+      g.lineTo(x,h-d[i]/255*(h-10));
+    }
+    g.lineTo(w,h);g.closePath();
+    g.fillStyle=cv("--hot");g.globalAlpha=.85;g.fill();g.globalAlpha=1;
+  }
+  requestAnimationFrame(draw);
+}
+draw();
+</script>
+</body>
+</html>
