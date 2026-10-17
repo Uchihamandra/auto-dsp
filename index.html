@@ -35,6 +35,7 @@ h2{font-size:18px;margin:0 0 8px;font-weight:600}
 .row span:last-child{color:var(--muted);font-variant-numeric:tabular-nums}
 .row input{grid-column:1/3;width:100%;accent-color:var(--accent);height:28px;margin:2px 0 0}
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.0/lame.min.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -49,13 +50,15 @@ h2{font-size:18px;margin:0 0 8px;font-weight:600}
 <span id="time">0:00 / 0:00</span>
 </div>
 <p id="name">Belum ada audio. Pilih file atau coba nada contoh.</p>
-<div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap"><button id="dl" class="main">Download hasil</button><button id="reset">Reset efek</button></div>
+<div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap"><select id="fmt" aria-label="Format file" style="font:inherit;padding:10px;min-height:44px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink)"><option value="192">MP3 192 kbps (kecil)</option><option value="128">MP3 128 kbps (paling kecil)</option><option value="wav">WAV (besar, kualitas penuh)</option></select><button id="dl" class="main">Download hasil</button><button id="reset">Reset efek</button></div>
 <p id="msg" style="color:var(--muted);font-size:14px;margin:6px 0 0;text-align:right;min-height:20px"></p>
 <main id="fx"></main>
 </div>
 <script>
 const $=s=>document.querySelector(s);
 const groups=[
+["Pemisah vokal",[
+["sep","Mode",0,2,1,0,v=>["Normal","Hilangkan vokal","Vokal saja"][v]]]],
 ["Kecepatan",[
 ["speed","Kecepatan putar",.25,2,.01,1,v=>v.toFixed(2)+"x"]]],
 ["Volume & filter",[
@@ -111,7 +114,7 @@ function initAudio(){
   N.conv=ctx.createConvolver();N.rwet=ctx.createGain();
   N.master=ctx.createGain();
   N.an=ctx.createAnalyser();N.an.fftSize=2048;N.an.smoothingTimeConstant=.8;
-  N.pre.connect(N.hp);N.hp.connect(N.bass);N.bass.connect(N.mid);N.mid.connect(N.treble);
+  N.sep=sepStage(ctx);N.sep.out.connect(N.pre);N.pre.connect(N.hp);N.hp.connect(N.bass);N.bass.connect(N.mid);N.mid.connect(N.treble);
   N.treble.connect(N.lp);N.lp.connect(N.shaper);N.shaper.connect(N.bus);
   N.bus.connect(N.master);
   N.bus.connect(N.delay);N.delay.connect(N.fb);N.fb.connect(N.delay);N.delay.connect(N.dwet);N.dwet.connect(N.master);
@@ -127,6 +130,7 @@ function apply(id){
     if(src)src.playbackRate.value=P.speed;
   }
   if(!ctx)return;
+  N.sep.set(P.sep);
   const t=ctx.currentTime;
   N.pre.gain.setTargetAtTime(P.gain,t,.01);
   N.hp.frequency.setTargetAtTime(P.hp,t,.01);
@@ -172,7 +176,7 @@ function play(){
   if(!buf)return;
   initAudio();ctx.resume();
   src=ctx.createBufferSource();src.buffer=buf;src.loop=$("#loop").checked;
-  src.connect(N.pre);
+  src.connect(N.sep.inp);
   src.onended=()=>{if(src===s0){playing=false;if(!src.loop)offset=0;ui()}};
   const s0=src;
   src.playbackRate.value=P.speed;curRate=P.speed;
@@ -194,7 +198,21 @@ $("#wave").addEventListener("click",e=>{
   offset=(e.clientX-r.left)/r.width*buf.duration;
   if(was)play();
 });
-async function renderOffline(){
+function sepStage(c){
+  const inp=c.createGain(),out=c.createGain(),sp=c.createChannelSplitter(2);
+  const dry=c.createGain(),kar=c.createGain(),voc=c.createGain(),side=c.createGain(),mid=c.createGain(),nR=c.createGain(),hL=c.createGain(),hR=c.createGain();
+  const f=(t,hz)=>{const n=c.createBiquadFilter();n.type=t;n.frequency.value=hz;return n};
+  const lpB=f("lowpass",150),hpV=f("highpass",150),lpV=f("lowpass",8000);
+  nR.gain.value=-1;hL.gain.value=.5;hR.gain.value=.5;
+  inp.connect(dry);dry.connect(out);
+  inp.connect(sp);
+  sp.connect(side,0);sp.connect(nR,1);nR.connect(side);
+  sp.connect(hL,0);sp.connect(hR,1);hL.connect(mid);hR.connect(mid);
+  side.connect(kar);mid.connect(lpB);lpB.connect(kar);kar.connect(out);
+  mid.connect(hpV);hpV.connect(lpV);lpV.connect(voc);voc.connect(out);
+  return{inp,out,set:m=>{dry.gain.value=m===0?1:0;kar.gain.value=m===1?1:0;voc.gain.value=m===2?1:0}};
+}
+async function renderOffline(onP){
   const sr=buf.sampleRate,tail=(P.dmix>0?3:0)+(P.rmix>0?P.rsize:0)+.1;
   const o=new OfflineAudioContext(2,Math.ceil((buf.duration/P.speed+tail)*sr),sr);
   const b=(t,f,g)=>{const n=o.createBiquadFilter();n.type=t;n.frequency.value=f;n.gain.value=g;n.Q.value=.7;return n};
@@ -204,21 +222,47 @@ async function renderOffline(){
   const sh=o.createWaveShaper();sh.oversample="2x";sh.curve=curve(P.drive*.8);
   const bus=o.createGain(),dl=o.createDelay(1.5),fb=o.createGain(),dw=o.createGain(),cn=o.createConvolver(),rw=o.createGain();
   dl.delayTime.value=P.dtime;fb.gain.value=P.dfb;dw.gain.value=P.dmix;rw.gain.value=P.rmix;cn.buffer=ir(P.rsize);
-  s.connect(pre);pre.connect(hp);hp.connect(bs);bs.connect(md);md.connect(tr);tr.connect(lp);lp.connect(sh);sh.connect(bus);
-  bus.connect(o.destination);
-  bus.connect(dl);dl.connect(fb);fb.connect(dl);dl.connect(dw);dw.connect(o.destination);
-  bus.connect(cn);cn.connect(rw);rw.connect(o.destination);
+  const sp=sepStage(o);sp.set(P.sep);s.connect(sp.inp);sp.out.connect(pre);let n=pre;
+  const add=(node,on)=>{if(on){n.connect(node);n=node}};
+  add(hp,P.hp>20);add(bs,P.bass!==0);add(md,P.mid!==0);add(tr,P.treble!==0);add(lp,P.lp<20000);add(sh,P.drive>0);
+  n.connect(bus);bus.connect(o.destination);
+  if(P.dmix>0){bus.connect(dl);dl.connect(fb);fb.connect(dl);dl.connect(dw);dw.connect(o.destination)}
+  if(P.rmix>0){bus.connect(cn);cn.connect(rw);rw.connect(o.destination)}
+  const total=o.length/sr,step=Math.max(.5,total/100);
+  for(let t=step;t<total-.2;t+=step){
+    o.suspend(t).then(()=>{if(onP)onP(t/total);o.resume()});
+  }
   s.start();
   return o.startRendering();
 }
-function wavBytes(ab){
+async function wavBytes(ab,onP){
   const ch=ab.numberOfChannels,n=ab.length,sr=ab.sampleRate,v=new DataView(new ArrayBuffer(44+n*ch*2));
   const w=(p,t)=>{for(let i=0;i<t.length;i++)v.setUint8(p+i,t.charCodeAt(i))};
   w(0,"RIFF");v.setUint32(4,36+n*ch*2,true);w(8,"WAVEfmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,ch,true);
   v.setUint32(24,sr,true);v.setUint32(28,sr*ch*2,true);v.setUint16(32,ch*2,true);v.setUint16(34,16,true);w(36,"data");v.setUint32(40,n*ch*2,true);
   const d=[];for(let c=0;c<ch;c++)d.push(ab.getChannelData(c));
-  let p=44;for(let i=0;i<n;i++)for(let c=0;c<ch;c++){const x=Math.max(-1,Math.min(1,d[c][i]));v.setInt16(p,x<0?x*32768:x*32767,true);p+=2}
+  let p=44;
+  for(let i=0;i<n;i++){
+    for(let c=0;c<ch;c++){const x=Math.max(-1,Math.min(1,d[c][i]));v.setInt16(p,x<0?x*32768:x*32767,true);p+=2}
+    if(i%500000===499999){if(onP)onP(i/n);await new Promise(r=>setTimeout(r))}
+  }
+  if(onP)onP(1);
   return new Uint8Array(v.buffer);
+}
+async function mp3Bytes(ab,kbps,onP){
+  if(!window.lamejs)throw new Error("no lamejs");
+  const ch=Math.min(2,ab.numberOfChannels),enc=new lamejs.Mp3Encoder(ch,ab.sampleRate,kbps);
+  const toI=a=>{const o=new Int16Array(a.length);for(let i=0;i<a.length;i++){const x=Math.max(-1,Math.min(1,a[i]));o[i]=x<0?x*32768:x*32767}return o};
+  const L=toI(ab.getChannelData(0)),R=ch>1?toI(ab.getChannelData(1)):null;
+  const parts=[],blk=1152*20;
+  for(let i=0,k=0;i<L.length;i+=blk,k++){
+    const b=ch>1?enc.encodeBuffer(L.subarray(i,i+blk),R.subarray(i,i+blk)):enc.encodeBuffer(L.subarray(i,i+blk));
+    if(b.length)parts.push(new Uint8Array(b));
+    if(k%40===0){if(onP)onP(i/L.length);await new Promise(r=>setTimeout(r))}
+  }
+  const f=enc.flush();if(f.length)parts.push(new Uint8Array(f));
+  if(onP)onP(1);
+  return new Blob(parts,{type:"audio/mpeg"});
 }
 function crc32(u){
   let t=crc32.t;
@@ -237,20 +281,32 @@ if(window.claude)claude.use("downloads").then(d=>{if(d)$("#dl").hidden=false}).c
 $("#dl").onclick=async()=>{
   if(!buf)return msg("Pilih audio dulu, lalu atur efeknya.");
   const dls=window.claude?await claude.use("downloads").catch(()=>null):null;
-  msg("Memproses audio...");
+  msg("Memproses audio... 0%");
+  const iv=0;
   try{
-    const wav=wavBytes(await renderOffline());
+    await new Promise(r=>setTimeout(r,60));
+    const ab=await renderOffline(f=>msg("Merender audio... "+Math.round(f*90)+"%"));
+    const prog=f=>msg("Menyusun file... "+Math.round(90+f*10)+"%");
+    let data,ext="wav",mime="audio/wav",note="";
+    const choice=$("#fmt").value;
+    if(choice!=="wav"){
+      try{data=await mp3Bytes(ab,+choice,prog);ext="mp3";mime="audio/mpeg"}
+      catch(err){note=" (MP3 gagal, jadi disimpan sebagai WAV)"}
+    }
+    if(!data)data=await wavBytes(ab,prog);
+    clearInterval(iv);
     if(dls){
-      await dls.save({filename:base+"-dsp.zip",data:zip(base+"-dsp.wav",wav)});
-      msg("Tersimpan. Ekstrak ZIP-nya untuk mendapat file WAV.");
+      const bytes=data instanceof Blob?new Uint8Array(await data.arrayBuffer()):data;
+      await dls.save({filename:base+"-dsp.zip",data:zip(base+"-dsp."+ext,bytes)});
+      msg("Tersimpan. Ekstrak ZIP-nya untuk mendapat file "+ext.toUpperCase()+"."+note);
     }else{
       const a=document.createElement("a");
-      a.href=URL.createObjectURL(new Blob([wav],{type:"audio/wav"}));
-      a.download=base+"-dsp.wav";
+      a.href=URL.createObjectURL(new Blob([data],{type:mime}));
+      a.download=base+"-dsp."+ext;
       document.body.appendChild(a);a.click();a.remove();
-      msg("File WAV sudah diunduh.");
+      msg("File "+ext.toUpperCase()+" sudah diunduh."+note);
     }
-  }catch(e){msg(e&&e.code==="declined"?"Download dibatalkan.":"Gagal membuat file. Coba lagi.")}
+  }catch(e){clearInterval(iv);msg(e&&e.code==="declined"?"Download dibatalkan.":"Gagal membuat file. Coba lagi.")}
 };
 const fmtT=s=>Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0");
 const cv=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
